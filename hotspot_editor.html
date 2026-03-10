@@ -1,0 +1,251 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Hotspot Editor</title>
+  <style>
+    body { font-family: system-ui, Arial; margin: 16px; }
+    .row { display: flex; gap: 16px; align-items: flex-start; }
+    .panel { width: 340px; }
+    .panel textarea { width: 100%; height: 280px; font-family: ui-monospace, Menlo, Consolas; }
+    .panel input { width: 84px; }
+    .panel button { margin: 6px 6px 6px 0; }
+    .hint { font-size: 12px; opacity: 0.75; margin-top: 8px; }
+
+    .stage {
+      position: relative;
+      display: inline-block;
+      line-height: 0;
+      user-select: none;
+      border: 1px solid #ddd;
+    }
+    .stage img { display: block; max-width: 1000px; height: auto; }
+
+    .box {
+      position: absolute;
+      box-sizing: border-box;
+      border: 2px solid rgba(0,160,0,0.95);
+      background: rgba(0,160,0,0.25);
+      cursor: grab;
+      touch-action: none;
+    }
+    .box:active { cursor: grabbing; }
+    .label {
+      position: absolute;
+      left: 2px; top: 2px;
+      font-size: 12px;
+      background: rgba(255,255,255,0.85);
+      padding: 1px 4px;
+      border-radius: 4px;
+      line-height: 1.2;
+    }
+  </style>
+</head>
+<body>
+
+<h2>Hotspot Editor (percent coordinates)</h2>
+
+<div class="row">
+  <div class="panel">
+    <div>
+      <label>Image file: </label>
+      <input id="imgName" value="pDist_wheel_v2_boy.png" style="width: 220px;">
+      <button id="loadImg">Load</button>
+    </div>
+
+    <div style="margin-top:10px;">
+      <label>Box size (percent): </label><br>
+      <label>w% </label><input id="wPct" value="8">
+      <label>h% </label><input id="hPct" value="14.1">
+      <button id="applySize">Apply to all</button>
+    </div>
+
+    <div style="margin-top:10px;">
+      <button id="reset">Reset boxes</button>
+      <button id="copy">Copy JSON</button>
+    </div>
+
+    <div class="hint">
+      Drag boxes to place them. Boxes are fixed-size (equal-sized).<br>
+      Tip: zoom browser (Ctrl/Cmd + / -) for precision.
+    </div>
+
+    <div style="margin-top:10px;">
+      <textarea id="out" spellcheck="false"></textarea>
+    </div>
+  </div>
+
+  <div>
+    <div id="stage" class="stage">
+      <img id="img" alt="">
+      <!-- boxes injected here -->
+    </div>
+  </div>
+</div>
+
+<script>
+  const N = 13;
+
+  // Initial positions (your current ones)
+  let hotspots = [
+    {id:1,  x:2,  y:63, w:8, h:14.1},
+    {id:2,  x:8,  y:53, w:8, h:14.1},
+    {id:3,  x:15, y:43, w:8, h:14.1},
+    {id:4,  x:21, y:65, w:8, h:14.1},
+    {id:5,  x:27, y:50, w:8, h:14.1},
+    {id:6,  x:34, y:44, w:8, h:14.1},
+    {id:7,  x:41, y:50, w:8, h:14.1},
+    {id:8,  x:48, y:65, w:8, h:14.1},
+    {id:9,  x:55, y:50, w:8, h:14.1},
+    {id:10, x:62, y:44, w:8, h:14.1},
+    {id:11, x:69, y:63, w:8, h:14.1},
+    {id:12, x:76, y:50, w:8, h:14.1},
+    {id:13, x:83, y:44, w:8, h:14.1}
+  ];
+
+  const stage = document.getElementById('stage');
+  const img = document.getElementById('img');
+  const out = document.getElementById('out');
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function render() {
+    // remove old boxes
+    [...stage.querySelectorAll('.box')].forEach(b => b.remove());
+
+    // stage size is based on displayed img size
+    const rect = img.getBoundingClientRect();
+    const W = rect.width;
+    const H = rect.height;
+
+    hotspots.forEach(h => {
+      const box = document.createElement('div');
+      box.className = 'box';
+      box.dataset.id = h.id;
+
+      // percent -> px for rendering
+      box.style.left = (h.x / 100 * W) + 'px';
+      box.style.top = (h.y / 100 * H) + 'px';
+      box.style.width = (h.w / 100 * W) + 'px';
+      box.style.height = (h.h / 100 * H) + 'px';
+
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = h.id;
+      box.appendChild(label);
+
+      stage.appendChild(box);
+
+      // Drag logic
+      let dragging = false;
+      let startX = 0, startY = 0;
+      let startLeftPx = 0, startTopPx = 0;
+
+      const onDown = (e) => {
+        e.preventDefault();
+        dragging = true;
+        box.setPointerCapture(e.pointerId);
+        startX = e.clientX;
+        startY = e.clientY;
+        startLeftPx = parseFloat(box.style.left);
+        startTopPx = parseFloat(box.style.top);
+      };
+
+      const onMove = (e) => {
+        if (!dragging) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+
+        // Move in px, then convert back to percent stored
+        const newLeftPx = startLeftPx + dx;
+        const newTopPx  = startTopPx + dy;
+
+        // convert to percent
+        const newX = (newLeftPx / W) * 100;
+        const newY = (newTopPx  / H) * 100;
+
+        // keep inside image bounds (so box doesn’t go off image)
+        const maxX = 100 - h.w;
+        const maxY = 100 - h.h;
+
+        h.x = clamp(newX, 0, maxX);
+        h.y = clamp(newY, 0, maxY);
+
+        box.style.left = (h.x / 100 * W) + 'px';
+        box.style.top  = (h.y / 100 * H) + 'px';
+
+        dump();
+      };
+
+      const onUp = (e) => {
+        dragging = false;
+        try { box.releasePointerCapture(e.pointerId); } catch {}
+      };
+
+      box.addEventListener('pointerdown', onDown);
+      box.addEventListener('pointermove', onMove);
+      box.addEventListener('pointerup', onUp);
+      box.addEventListener('pointercancel', onUp);
+    });
+
+    dump();
+  }
+
+  function dump() {
+    // nice rounding (2 decimals)
+    const cleaned = hotspots.map(h => ({
+      id: h.id,
+      x: Math.round(h.x * 100) / 100,
+      y: Math.round(h.y * 100) / 100,
+      w: Math.round(h.w * 100) / 100,
+      h: Math.round(h.h * 100) / 100
+    }));
+    out.value = JSON.stringify(cleaned, null, 2);
+  }
+
+  function loadImage() {
+    const name = document.getElementById('imgName').value.trim();
+    img.src = name;
+  }
+
+  img.addEventListener('load', () => {
+    // render when image is loaded and displayed
+    render();
+  });
+
+  window.addEventListener('resize', () => {
+    // re-render boxes on resize (percent stays the same)
+    if (img.complete && img.naturalWidth) render();
+  });
+
+  document.getElementById('loadImg').addEventListener('click', loadImage);
+
+  document.getElementById('applySize').addEventListener('click', () => {
+    const w = parseFloat(document.getElementById('wPct').value);
+    const h = parseFloat(document.getElementById('hPct').value);
+    hotspots.forEach(x => { x.w = w; x.h = h; });
+    render();
+  });
+
+  document.getElementById('reset').addEventListener('click', () => {
+    // put them back to the starting set (edit if you want a different reset)
+    hotspots = hotspots.map(h => ({...h, w: hotspots[0].w, h: hotspots[0].h}));
+    render();
+  });
+
+  document.getElementById('copy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(out.value);
+      alert('Copied JSON to clipboard.');
+    } catch {
+      out.select();
+      document.execCommand('copy');
+      alert('Copied (fallback).');
+    }
+  });
+
+  // auto-load on open
+  loadImage();
+</script>
+</body>
+</html>
